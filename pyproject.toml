@@ -10,4 +10,8 @@ test = ["pytest>=8,<10", "httpx>=0.27,<1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["clearcoat*"]
+exclude = ["scheduler*", "tests*"]
+namespaces = false
