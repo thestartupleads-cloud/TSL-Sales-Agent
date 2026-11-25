@@ -77,3 +77,15 @@ class GHLSyncRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+
+class GHLExportCheckpoint(Base):
+    """Last fully imported UTC time, per location and message stream."""
+
+    __tablename__ = "ghl_export_checkpoints"
+    account_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    stream: Mapped[str] = mapped_column(String(24), primary_key=True)
+    high_water_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+

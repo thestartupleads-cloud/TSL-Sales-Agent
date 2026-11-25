@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from datetime import datetime
 from threading import Lock
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -8,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .database import SessionLocal
 from .ghl_client import GHLAPIError, GHLClient
+from .ghl_export_sync import sync_export_window, sync_incremental
 from .ghl_sync import sync_recent_conversations
 from .models import InboundEvent
 from .security import verify_ghl_signature
@@ -21,16 +23,20 @@ def health():
     return {"status": "ok", "service": "clearcoat"}
 
 
+def _validate_sync_secret(value: str | None) -> None:
+    if not settings.sync_trigger_secret or not settings.ghl_private_token or not settings.ghl_location_id:
+        raise HTTPException(503, "GHL sync is not configured")
+    if not value or not hmac.compare_digest(value, settings.sync_trigger_secret):
+        raise HTTPException(401, "Unauthorized")
+
+
 @app.post("/internal/sync/ghl")
 def manual_ghl_sync(
     x_sync_secret: str | None = Header(default=None, alias="X-Sync-Secret"),
     limit: int = Query(default=5, ge=1, le=5),
 ):
     """Protected pilot sync, currently capped at five Iconic Wraps conversations."""
-    if not settings.sync_trigger_secret or not settings.ghl_private_token or not settings.ghl_location_id:
-        raise HTTPException(503, "GHL sync is not configured")
-    if not x_sync_secret or not hmac.compare_digest(x_sync_secret, settings.sync_trigger_secret):
-        raise HTTPException(401, "Unauthorized")
+    _validate_sync_secret(x_sync_secret)
     if not _sync_guard.acquire(blocking=False):
         raise HTTPException(409, "A sync is already running on this instance")
 
@@ -39,6 +45,43 @@ def manual_ghl_sync(
             return sync_recent_conversations(session, client, settings.ghl_location_id, limit=limit)
     except GHLAPIError as exc:
         raise HTTPException(exc.status_code, exc.code) from None
+    finally:
+        _sync_guard.release()
+
+
+@app.post("/internal/sync/ghl/incremental")
+def incremental_ghl_sync(x_sync_secret: str | None = Header(default=None, alias="X-Sync-Secret")):
+    """Read-only catch-up from durable per-stream UTC time checkpoints."""
+    _validate_sync_secret(x_sync_secret)
+    if not _sync_guard.acquire(blocking=False):
+        raise HTTPException(409, "A sync is already running on this instance")
+    try:
+        with GHLClient(settings.ghl_private_token) as client, SessionLocal() as session:
+            return sync_incremental(session, client, settings.ghl_location_id)
+    except GHLAPIError as exc:
+        raise HTTPException(exc.status_code, exc.code) from None
+    finally:
+        _sync_guard.release()
+
+
+@app.post("/internal/sync/ghl/window")
+def historical_ghl_window(
+    start_at: datetime,
+    end_at: datetime,
+    stream: str = Query(default="non_email", pattern="^(non_email|email)$"),
+    x_sync_secret: str | None = Header(default=None, alias="X-Sync-Secret"),
+):
+    """Manually backfill one bounded UTC window without modifying cron checkpoints."""
+    _validate_sync_secret(x_sync_secret)
+    if not _sync_guard.acquire(blocking=False):
+        raise HTTPException(409, "A sync is already running on this instance")
+    try:
+        with GHLClient(settings.ghl_private_token) as client, SessionLocal() as session:
+            return sync_export_window(session, client, settings.ghl_location_id, start_at, end_at, stream=stream)
+    except GHLAPIError as exc:
+        raise HTTPException(exc.status_code, exc.code) from None
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
     finally:
         _sync_guard.release()
 

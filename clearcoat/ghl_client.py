@@ -75,6 +75,40 @@ class GHLClient:
             raise GHLAPIError("ghl_invalid_conversations")
         return conversations[:limit]
 
+    def export_message_page(
+        self,
+        location_id: str,
+        start_at: str,
+        end_at: str,
+        *,
+        channel: str | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> tuple[list[dict], str | None]:
+        """Export one location-wide message page using the documented short-lived cursor."""
+        params = {
+            "locationId": location_id,
+            "startDate": start_at,
+            "endDate": end_at,
+            "limit": limit,
+            "sortBy": "createdAt",
+            "sortOrder": "asc",
+        }
+        if channel:
+            params["channel"] = channel
+        if cursor:
+            params["cursor"] = cursor
+        data = self._get("/conversations/messages/export", params)
+        messages = data.get("messages")
+        next_cursor = data.get("nextCursor")
+        if (
+            not isinstance(messages, list)
+            or not all(isinstance(msg, dict) for msg in messages)
+            or (next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor))
+        ):
+            raise GHLAPIError("ghl_invalid_export_response")
+        return messages, next_cursor
+
     def get_messages(self, conversation_id: str, *, max_pages: int = 3) -> tuple[list[dict], bool]:
         """Return messages and whether there may be older, uncollected pages."""
         if not conversation_id or len(conversation_id) > 128:

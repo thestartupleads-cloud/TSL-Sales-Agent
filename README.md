@@ -1,7 +1,9 @@
-# Clearcoat - M1 read-only GHL sync pilot
+# Clearcoat - M1 read-only GHL sync
 
 The first Iconic Wraps integration uses a GHL sub-account Private Integration Token (PIT).
 This module **only reads** conversations and messages from GHL and stores them in PostgreSQL.
+It includes the verified five-conversation pilot and a new time-windowed, location-wide
+message export path for incremental monitoring and manual historical backfill.
 No AI classification, follow-up actions, GHL notes, customer messages or automation are active yet.
 
 ## Local setup
@@ -78,16 +80,79 @@ Common errors:
 - `429 ghl_rate_limited`: GHL quota reached; retry later, not immediately.
 - `409`: Another sync is already running on the same web instance.
 
+## New: location-wide incremental monitoring (test before scheduling)
+
+The incremental endpoint fetches location-wide messages using the documented
+`GET /conversations/messages/export` API, in two streams: non-email and email.
+It keeps separate durable UTC checkpoints in `ghl_export_checkpoints`.
+The first call starts one hour back; later calls catch up in completed 30-minute
+windows, overlapping two minutes to avoid time-boundary gaps. Failed windows
+retain their previous checkpoints and are retried safely on the next invocation.
+
+Once the new PostgreSQL table is initialized, run a **manual** verification:
+
+```powershell
+$renderUrl = 'https://clearcoat-api.onrender.com'
+$syncSecret = Read-Host 'Enter your Render sync trigger secret'
+$headers = @{ 'X-Sync-Secret' = $syncSecret }
+Invoke-RestMethod -Method POST -Uri "$renderUrl/internal/sync/ghl/incremental" -Headers $headers
+```
+
+The response returns `status=completed`, a `streams` list, and PII-free counts.
+Repeat the call to verify existing message IDs are duplicates, and check both
+streams. A request can return `409 ghl_export_window_too_large` if a time window
+has more than 1,000 matching messages; this protects the checkpoint rather than
+silently losing records. Reduce the window size in code before enabling cron.
+
+For manual historical backfill, import one **bounded UTC date window at a time**,
+once for each `stream=non_email` and `stream=email`. For example:
+
+```powershell
+$url = "$renderUrl/internal/sync/ghl/window?start_at=2026-11-25T00%3A00%3A00Z&end_at=2026-11-25T01%3A00%3A00Z&stream=non_email"
+Invoke-RestMethod -Method POST -Uri $url -Headers $headers
+```
+
+Historical window imports do not advance incremental checkpoints. Repeat with
+`stream=email`, then advance to the next historical window. Importing an entire
+account's history is **not automatic yet**; first verify the export response with
+one short window and plan backfill coverage. Export cursors expire after two
+minutes, so this code never persists them across runs.
+
+## Optional scheduler - enable only after the incremental test passes
+
+`scheduler/worker.js` and `scheduler/wrangler.toml` provide a separate Cloudflare
+Worker triggered every five minutes. It invokes the protected incremental endpoint.
+This is a proposed deployment artifact, not a live schedule: it starts only if
+you explicitly deploy the worker. Do not attach it to an existing Dialpad worker.
+
+To deploy after validation and with Cloudflare credentials configured locally:
+
+```sh
+cd scheduler
+npx wrangler secret put CLEARCOAT_SYNC_SECRET
+npx wrangler deploy
+```
+
+Set the Cloudflare secret to **the same value as Render's** `SYNC_TRIGGER_SECRET`.
+The Worker reads the Render endpoint URL from `wrangler.toml` and does not log
+customer content or authentication headers. Monitor Cloudflare scheduled-event
+results and Render `ghl_sync_runs` records. Running the web service on multiple
+instances still requires a database-level distributed lock before scheduling.
+
 ## Limits and next implementation slice
 
-- Current search checks **only the five most recently active conversations**, not
-  every conversation in the account. Do not claim complete ongoing monitoring yet.
+- The original `POST /internal/sync/ghl` search still checks only five recent
+  conversations; it is retained for smoke tests, not account-wide monitoring.
+- The new location-wide export covers non-email messages and email messages in
+  separate streams, but **GHL's export excludes activity messages, group chats,
+  and SMS review requests**. Use conversation-level reconciliation in a later
+  slice to close those documented gaps before claiming complete observation.
 - GHL messages are stored in PostgreSQL and may contain customer information;
   restrict database access, set retention/backup policies, and get client approval.
 - Each message is unique on `(account_id, ghl_message_id)`, so repeated polling is safe.
 - Run metadata is stored in `ghl_sync_runs` without customer text.
-- No timer worker, cron scheduler, historical backfill, automatic retries, Redis,
-  AI prompts or GHL writes are included. Those are subsequent milestones.
+- No timer worker, Redis, AI prompts or GHL writes are included. A Cloudflare cron
+  template is included but deliberately not deployed or enabled by this package.
 - The older marketplace webhook route is **not part of this PIT integration**.
   Leave `GHL_WEBHOOK_PUBLIC_KEY` and `GHL_ALLOWED_LOCATION_IDS` blank; do not
   configure that webhook until its signature scheme has been separately verified.
@@ -98,5 +163,6 @@ Official GHL API docs:
 
 - https://marketplace.gohighlevel.com/docs/ghl/conversations/search-conversation/
 - https://marketplace.gohighlevel.com/docs/ghl/conversations/get-messages/
+- https://marketplace.gohighlevel.com/docs/ghl/conversations/export-messages-by-location/
 - https://marketplace.gohighlevel.com/docs/other/rate-limits/
 
