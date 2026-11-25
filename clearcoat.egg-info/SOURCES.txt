@@ -3,6 +3,8 @@ pyproject.toml
 clearcoat/__init__.py
 clearcoat/config.py
 clearcoat/database.py
+clearcoat/ghl_client.py
+clearcoat/ghl_sync.py
 clearcoat/init_db.py
 clearcoat/main.py
 clearcoat/models.py
@@ -12,4 +14,5 @@ clearcoat.egg-info/SOURCES.txt
 clearcoat.egg-info/dependency_links.txt
 clearcoat.egg-info/requires.txt
 clearcoat.egg-info/top_level.txt
+tests/test_ghl_sync.py
 tests/test_security.py

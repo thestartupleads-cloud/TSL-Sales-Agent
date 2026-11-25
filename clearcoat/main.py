@@ -1,18 +1,46 @@
 import hashlib
+import hmac
 import json
-from fastapi import FastAPI, HTTPException, Request
+from threading import Lock
+
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .database import SessionLocal
+from .ghl_client import GHLAPIError, GHLClient
+from .ghl_sync import sync_recent_conversations
 from .models import InboundEvent
 from .security import verify_ghl_signature
 
 app = FastAPI(title="Clearcoat", version="0.1.0")
+_sync_guard = Lock()
 
 
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "clearcoat"}
+
+
+@app.post("/internal/sync/ghl")
+def manual_ghl_sync(
+    x_sync_secret: str | None = Header(default=None, alias="X-Sync-Secret"),
+    limit: int = Query(default=5, ge=1, le=5),
+):
+    """Protected pilot sync, currently capped at five Iconic Wraps conversations."""
+    if not settings.sync_trigger_secret or not settings.ghl_private_token or not settings.ghl_location_id:
+        raise HTTPException(503, "GHL sync is not configured")
+    if not x_sync_secret or not hmac.compare_digest(x_sync_secret, settings.sync_trigger_secret):
+        raise HTTPException(401, "Unauthorized")
+    if not _sync_guard.acquire(blocking=False):
+        raise HTTPException(409, "A sync is already running on this instance")
+
+    try:
+        with GHLClient(settings.ghl_private_token) as client, SessionLocal() as session:
+            return sync_recent_conversations(session, client, settings.ghl_location_id, limit=limit)
+    except GHLAPIError as exc:
+        raise HTTPException(exc.status_code, exc.code) from None
+    finally:
+        _sync_guard.release()
 
 
 @app.post("/webhooks/ghl", status_code=202)

@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     ghl_write_enabled: bool = False
     customer_send_enabled: bool = False
     app_env: str = "development"
+    ghl_private_token: str = ""
+    ghl_location_id: str = ""
+    sync_trigger_secret: str = ""
 
     @property
     def allowed_locations(self) -> set[str]:
