@@ -1,9 +1,15 @@
 name = "clearcoat-ghl-sync"
 main = "worker.js"
-compatibility_date = "2026-11-26"
+compatibility_date = "2026-11-25"
 
 [triggers]
 crons = ["*/5 * * * *"]
 
 [vars]
 CLEARCOAT_SYNC_URL = "https://clearcoat-api.onrender.com/internal/sync/ghl/incremental"
+
+[observability]
+enabled = true
+
+[observability.logs]
+invocation_logs = true

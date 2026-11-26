@@ -1,6 +1,6 @@
 from datetime import datetime
 from uuid import uuid4
-from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -26,6 +26,30 @@ class LeadTimer(Base):
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     event_id: Mapped[str | None] = mapped_column(ForeignKey("inbound_events.id"), nullable=True)
     __table_args__ = (Index("ix_timers_due", "status", "due_at"),)
+
+
+class LeadState(Base):
+    """Read-only, rebuildable M1 conversation state; never a GHL action queue."""
+
+    __tablename__ = "lead_states"
+    account_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    contact_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    review_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_outbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_human_reply_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_inbound_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    response_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    response_sla_minutes: Mapped[int] = mapped_column(nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        Index("ix_lead_states_queue", "account_id", "state", "response_due_at"),
+    )
 
 
 class GHLConversation(Base):

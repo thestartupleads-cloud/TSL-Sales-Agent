@@ -13,6 +13,7 @@ from .ghl_export_sync import sync_export_window, sync_incremental
 from .ghl_sync import sync_recent_conversations
 from .models import InboundEvent
 from .security import verify_ghl_signature
+from .tracker import list_tracked_leads, rebuild_lead_states, tracker_summary
 
 app = FastAPI(title="Clearcoat", version="0.1.0")
 _sync_guard = Lock()
@@ -28,6 +29,62 @@ def _validate_sync_secret(value: str | None) -> None:
         raise HTTPException(503, "GHL sync is not configured")
     if not value or not hmac.compare_digest(value, settings.sync_trigger_secret):
         raise HTTPException(401, "Unauthorized")
+
+
+def _validate_tracker_access(value: str | None) -> None:
+    _validate_sync_secret(value)
+    if not settings.tracker_enabled:
+        raise HTTPException(503, "Lead tracker has not been enabled")
+
+
+@app.get("/internal/tracker/summary")
+def internal_tracker_summary(
+    x_sync_secret: str | None = Header(default=None, alias="X-Sync-Secret"),
+    active_days: int = Query(default=14, ge=1, le=90),
+):
+    """PII-free, read-only metrics for the single configured GHL location."""
+    _validate_tracker_access(x_sync_secret)
+    with SessionLocal() as session:
+        return tracker_summary(session, settings.ghl_location_id, active_days=active_days)
+
+
+@app.get("/internal/tracker/leads")
+def internal_tracker_leads(
+    x_sync_secret: str | None = Header(default=None, alias="X-Sync-Secret"),
+    state: str | None = Query(default=None, pattern="^(needs_reply|waiting_customer|needs_review|outbound_only)$"),
+    overdue_only: bool = False,
+    active_days: int = Query(default=14, ge=1, le=90),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    """Return IDs and state timestamps only, never conversation bodies."""
+    _validate_tracker_access(x_sync_secret)
+    with SessionLocal() as session:
+        return {"leads": list_tracked_leads(
+            session, settings.ghl_location_id, state=state,
+            overdue_only=overdue_only, active_days=active_days, limit=limit,
+        )}
+
+
+@app.post("/internal/tracker/rebuild")
+def internal_tracker_rebuild(
+    x_sync_secret: str | None = Header(default=None, alias="X-Sync-Secret"),
+    limit: int = Query(default=100, ge=1, le=200),
+    after: str | None = Query(default=None, max_length=128),
+    force: bool = False,
+):
+    """Bounded historical replay over our database; no CRM network requests."""
+    _validate_tracker_access(x_sync_secret)
+    if not _sync_guard.acquire(blocking=False):
+        raise HTTPException(409, "A sync or tracker rebuild is already running")
+    try:
+        with SessionLocal() as session:
+            return rebuild_lead_states(
+                session, settings.ghl_location_id,
+                limit=limit, after=after, force=force,
+                sla_minutes=settings.tracker_response_sla_minutes,
+            )
+    finally:
+        _sync_guard.release()
 
 
 @app.post("/internal/sync/ghl")

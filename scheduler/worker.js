@@ -13,7 +13,7 @@ export default {
     const response = await fetch(endpoint.toString(), {
       method: "POST",
       headers: { "X-Sync-Secret": env.CLEARCOAT_SYNC_SECRET },
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(120000),
     });
     if (!response.ok) {

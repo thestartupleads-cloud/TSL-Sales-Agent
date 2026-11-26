@@ -4,7 +4,9 @@ The first Iconic Wraps integration uses a GHL sub-account Private Integration To
 This module **only reads** conversations and messages from GHL and stores them in PostgreSQL.
 It includes the verified five-conversation pilot and a new time-windowed, location-wide
 message export path for incremental monitoring and manual historical backfill.
-No AI classification, follow-up actions, GHL notes, customer messages or automation are active yet.
+The optional M1 tracker adds read-only lead states and provisional reply
+deadlines. No AI classification, GHL write actions or customer messaging is
+active. See `M1_TRACKER_DEPLOY.md` for the safe, opt-in deployment sequence.
 
 ## Local setup
 
@@ -27,6 +29,8 @@ No AI classification, follow-up actions, GHL notes, customer messages or automat
 | `CUSTOMER_SEND_ENABLED=false` | Keep customer messaging disabled |
 | `APP_ENV=staging` | Label the staging environment |
 | `PYTHON_VERSION=3.11.9` | Render Python version (when configured there) |
+| `TRACKER_ENABLED=false` | Safe default: keep new lead tracker disabled until the additive table exists |
+| `TRACKER_RESPONSE_SLA_MINUTES=30` | Pilot wall-clock deadline (confirm against approved playbook) |
 
 PIT scopes required: `conversations.readonly` and `conversations/message.readonly`.
 Do **not** paste any secret into ChatGPT, GitHub, screenshots, request query strings or application logs.
@@ -122,8 +126,9 @@ minutes, so this code never persists them across runs.
 
 `scheduler/worker.js` and `scheduler/wrangler.toml` provide a separate Cloudflare
 Worker triggered every five minutes. It invokes the protected incremental endpoint.
-This is a proposed deployment artifact, not a live schedule: it starts only if
-you explicitly deploy the worker. Do not attach it to an existing Dialpad worker.
+The worker is deployed separately from Render/GitHub; uploading this code
+package does not itself change the existing live Cloudflare schedule. Do not
+attach it to an existing Dialpad worker.
 
 To deploy after validation and with Cloudflare credentials configured locally:
 
@@ -139,6 +144,22 @@ customer content or authentication headers. Monitor Cloudflare scheduled-event
 results and Render `ghl_sync_runs` records. Running the web service on multiple
 instances still requires a database-level distributed lock before scheduling.
 
+## Optional M1 lead tracker (observation only)
+
+After the `lead_states` table is created, enable `TRACKER_ENABLED=true`.
+Newly inserted GHL messages refresh the corresponding local lead state.
+The protected endpoints are:
+
+- `POST /internal/tracker/rebuild?limit=50` to process previously stored conversations.
+- `GET /internal/tracker/summary?active_days=14` for safe counts and overdue totals.
+- `GET /internal/tracker/leads?state=needs_reply&overdue_only=true` for ID-only review queues.
+
+All three require the existing `X-Sync-Secret` header. No conversation body
+is returned. Lead state is rule-based (not LLM-driven), and an outbound without
+reliable human attribution is marked `needs_review`. Due times currently count
+wall-clock minutes; holidays, business hours, and verified sales outcomes are
+not yet incorporated. Follow `M1_TRACKER_DEPLOY.md` before production rollout.
+
 ## Limits and next implementation slice
 
 - The original `POST /internal/sync/ghl` search still checks only five recent
@@ -151,8 +172,8 @@ instances still requires a database-level distributed lock before scheduling.
   restrict database access, set retention/backup policies, and get client approval.
 - Each message is unique on `(account_id, ghl_message_id)`, so repeated polling is safe.
 - Run metadata is stored in `ghl_sync_runs` without customer text.
-- No timer worker, Redis, AI prompts or GHL writes are included. A Cloudflare cron
-  template is included but deliberately not deployed or enabled by this package.
+- No timer worker, Redis, AI prompts or GHL writes are included. The new
+  response due timestamp is persisted for reporting only; it sends no alerts.
 - The older marketplace webhook route is **not part of this PIT integration**.
   Leave `GHL_WEBHOOK_PUBLIC_KEY` and `GHL_ALLOWED_LOCATION_IDS` blank; do not
   configure that webhook until its signature scheme has been separately verified.

@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .ghl_client import GHLAPIError, GHLClient
+from .config import settings
 from .models import GHLConversation, GHLMessage, GHLSyncRun
 
 
@@ -36,6 +37,7 @@ def _store_conversation(
         row.contact_id = contact_id
         row.last_seen_at = datetime.now(timezone.utc)
 
+    inserted = 0
     for message in messages:
         run.messages_seen += 1
         message_id = message.get("id")
@@ -68,6 +70,19 @@ def _store_conversation(
             run.messages_duplicate += 1
         else:
             run.messages_inserted += 1
+            inserted += 1
+
+    # Opt-in only. Initial deployment cannot affect the working sync until the
+    # additive lead_states table exists and TRACKER_ENABLED is explicitly set.
+    if inserted and settings.tracker_enabled:
+        from .tracker import refresh_conversation_state
+
+        refresh_conversation_state(
+            session,
+            account_id,
+            conversation_id,
+            sla_minutes=settings.tracker_response_sla_minutes,
+        )
 
 
 def sync_recent_conversations(

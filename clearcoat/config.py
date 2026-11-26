@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +13,8 @@ class Settings(BaseSettings):
     ghl_private_token: str = ""
     ghl_location_id: str = ""
     sync_trigger_secret: str = ""
+    tracker_enabled: bool = False
+    tracker_response_sla_minutes: int = Field(default=30, ge=1, le=1440)
 
     @property
     def allowed_locations(self) -> set[str]:
