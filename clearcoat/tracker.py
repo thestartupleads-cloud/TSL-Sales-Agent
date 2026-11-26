@@ -7,7 +7,7 @@ automation and ambiguous outbound messages. Uncertain data requires review.
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from .models import GHLConversation, GHLMessage, LeadState
@@ -21,6 +21,9 @@ REPLY_CHANNELS = (
     "WEBCHAT", "TYPE_WEBCHAT", "LIVE_CHAT", "TYPE_LIVE_CHAT",
     "GMB", "TYPE_GMB",
 )
+# GHL call records are activity, not proof that a rep answered a chat.
+# Keep the set conservative until we have verified actual export messageTypes.
+CALL_CHANNELS = ("CALL", "TYPE_CALL")
 AUTOMATED_SOURCES = ("workflow", "bulk_actions", "campaign", "api")
 STATES = ("needs_reply", "waiting_customer", "needs_review", "outbound_only")
 
@@ -68,6 +71,9 @@ def refresh_conversation_state(
     last_message = _latest(session, account_id, conversation_id)
     channel = func.upper(GHLMessage.message_type)
     eligible = channel.in_(REPLY_CHANNELS)
+    call_channel = channel.in_(CALL_CHANNELS)
+    latest_chat = _latest(session, account_id, conversation_id, eligible)
+    last_call = _latest(session, account_id, conversation_id, call_channel)
     last_inbound = _latest(session, account_id, conversation_id, eligible, GHLMessage.direction == "inbound")
     last_outbound = _latest(session, account_id, conversation_id, eligible, GHLMessage.direction == "outbound")
 
@@ -92,10 +98,15 @@ def refresh_conversation_state(
         .where(
             GHLMessage.account_id == account_id,
             GHLMessage.conversation_id == conversation_id,
-            or_(
-                GHLMessage.sent_at.is_(None),
-                GHLMessage.direction.is_(None),
-                GHLMessage.direction.notin_(("inbound", "outbound")),
+            and_(
+                # A call activity record may not have a message direction or
+                # timestamp; it must not invalidate otherwise sound chat data.
+                or_(GHLMessage.message_type.is_(None), ~call_channel),
+                or_(
+                    GHLMessage.sent_at.is_(None),
+                    GHLMessage.direction.is_(None),
+                    GHLMessage.direction.notin_(("inbound", "outbound")),
+                ),
             ),
         )
         .limit(1)
@@ -112,7 +123,7 @@ def refresh_conversation_state(
     elif last_message is None:
         state, reason = "needs_review", "no_dated_messages"
     elif (
-        (last_message.message_type or "").upper() not in REPLY_CHANNELS
+        (last_message.message_type or "").upper() not in REPLY_CHANNELS + CALL_CHANNELS
         and not (
             last_message.direction == "outbound"
             and (
@@ -122,6 +133,10 @@ def refresh_conversation_state(
         )
     ):
         state, reason = "needs_review", "latest_channel_not_supported"
+    elif latest_chat is None:
+        # Calls alone cannot establish either a pending customer message or
+        # a completed human reply.
+        state, reason = "needs_review", "no_supported_chat_messages"
     elif inbound_at is None:
         state = "outbound_only"
     elif inbound_at > now + timedelta(minutes=5):
@@ -132,6 +147,10 @@ def refresh_conversation_state(
         state, reason = "needs_review", "same_timestamp_reply"
     elif unverified_at is not None and unverified_at >= inbound_at:
         state, reason = "needs_review", "unverified_outbound_reply"
+    elif last_call is not None and _utc(last_call.sent_at) > inbound_at:
+        # A rep may have answered by phone. Until call direction and outcome
+        # are verified, do not silently mark the lead answered or overdue.
+        state, reason = "needs_review", "call_after_inbound_unverified"
     else:
         state = "needs_reply"
         due_at = inbound_at + timedelta(minutes=sla_minutes)
@@ -242,14 +261,31 @@ def list_tracked_leads(
     rows = session.scalars(
         query.order_by(LeadState.last_message_at.desc(), LeadState.conversation_id).limit(limit)
     ).all()
-    return [{
-        "conversation_id": row.conversation_id,
-        "contact_id": row.contact_id,
-        "state": row.state,
-        "review_reason": row.review_reason,
-        "last_message_at": _iso(row.last_message_at),
-        "last_inbound_at": _iso(row.last_inbound_at),
-        "last_human_reply_at": _iso(row.last_human_reply_at),
-        "response_due_at": _iso(row.response_due_at),
-        "overdue": bool(row.state == "needs_reply" and row.response_due_at and _utc(row.response_due_at) <= now),
-    } for row in rows]
+    result = []
+    for row in rows:
+        latest = _latest(session, account_id, row.conversation_id)
+        call = _latest(
+            session, account_id, row.conversation_id,
+            func.upper(GHLMessage.message_type).in_(CALL_CHANNELS),
+        )
+        result.append({
+            "conversation_id": row.conversation_id,
+            "contact_id": row.contact_id,
+            "state": row.state,
+            "review_reason": row.review_reason,
+            "last_message_at": _iso(row.last_message_at),
+            "last_inbound_at": _iso(row.last_inbound_at),
+            "last_human_reply_at": _iso(row.last_human_reply_at),
+            "response_due_at": _iso(row.response_due_at),
+            "overdue": bool(
+                row.state == "needs_reply"
+                and row.response_due_at
+                and _utc(row.response_due_at) <= now
+            ),
+            # Message metadata only. No message bodies, transcripts or phone numbers.
+            "last_message_type": latest.message_type if latest else None,
+            "last_message_direction": latest.direction if latest else None,
+            "last_message_source": latest.source if latest else None,
+            "last_call_at": _iso(call.sent_at) if call else None,
+        })
+    return result

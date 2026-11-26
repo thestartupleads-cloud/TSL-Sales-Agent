@@ -104,10 +104,56 @@ def test_missing_timestamps_or_unsupported_channels_require_review(sessions):
         session.query(GHLMessage).filter(GHLMessage.ghl_message_id == "missing-date").delete()
         session.commit()
 
-        message(session, "phone-call", minutes_ago=1, kind="TYPE_CALL")
+        message(session, "unsupported", minutes_ago=1, kind="TYPE_UNKNOWN_ACTIVITY")
         row = refresh_conversation_state(session, ACCOUNT, "conv-1", now=NOW)
         assert row.state == "needs_review"
         assert row.review_reason == "latest_channel_not_supported"
+
+
+def test_call_after_inbound_requires_review_not_overdue(sessions):
+    with sessions() as session:
+        message(session, "in-1", minutes_ago=60, kind="TYPE_INSTAGRAM")
+        message(session, "call-1", minutes_ago=10, kind="TYPE_CALL", direction=None)
+        row = refresh_conversation_state(session, ACCOUNT, "conv-1", now=NOW)
+        assert row.state == "needs_review"
+        assert row.review_reason == "call_after_inbound_unverified"
+        assert row.response_due_at is None
+        session.commit()
+        lead = list_tracked_leads(session, ACCOUNT, now=NOW)[0]
+        assert lead["last_message_type"] == "TYPE_CALL"
+        assert lead["last_call_at"] == (NOW - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+        assert "PRIVATE CUSTOMER TEXT" not in str(lead)
+
+
+def test_call_activity_does_not_override_answered_chat_or_newer_inbound(sessions):
+    with sessions() as session:
+        message(session, "in-1", minutes_ago=60)
+        message(session, "rep-1", minutes_ago=30, direction="outbound", user_id="rep")
+        message(session, "call-1", minutes_ago=20, kind="TYPE_CALL")
+        row = refresh_conversation_state(session, ACCOUNT, "conv-1", now=NOW)
+        assert row.state == "waiting_customer"
+
+        message(session, "in-2", minutes_ago=5)
+        row = refresh_conversation_state(session, ACCOUNT, "conv-1", now=NOW)
+        assert row.state == "needs_reply"
+        assert row.last_inbound_message_id == "in-2"
+
+
+def test_call_only_conversation_is_not_an_outbound_only_chat(sessions):
+    with sessions() as session:
+        message(session, "call-1", minutes_ago=15, kind="CALL")
+        row = refresh_conversation_state(session, ACCOUNT, "conv-1", now=NOW)
+        assert row.state == "needs_review"
+        assert row.review_reason == "no_supported_chat_messages"
+
+
+def test_undated_call_activity_does_not_invalidate_dated_chat(sessions):
+    with sessions() as session:
+        message(session, "in-1", minutes_ago=10)
+        message(session, "call-without-date", minutes_ago=None, direction=None, kind="TYPE_CALL")
+        row = refresh_conversation_state(session, ACCOUNT, "conv-1", now=NOW)
+        assert row.state == "needs_reply"
+        assert row.last_inbound_message_id == "in-1"
 
 
 def test_campaign_message_after_inbound_does_not_hide_unanswered_lead(sessions):
